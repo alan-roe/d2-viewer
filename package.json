@@ -1,0 +1,26 @@
+{
+  "name": "d2-viewer",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Web-based D2 diagram viewer with layer navigation and live reload",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@terrastruct/d2": "^0.1.33",
+    "solid-js": "^1.9.10"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/ws": "^8.18.1",
+    "chokidar": "^5.0.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.4",
+    "vite-plugin-solid": "^2.11.10",
+    "ws": "^8.19.0"
+  }
+}

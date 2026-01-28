@@ -1,0 +1,70 @@
+# Sample D2 with layers
+
+direction: down
+
+user: User {
+  shape: person
+}
+
+app: Application {
+  api: API Server
+  db: Database {
+    shape: cylinder
+  }
+  api -> db: queries
+}
+
+user -> app.api: requests
+
+layers: {
+  architecture: {
+    direction: down
+
+    frontend: Frontend {
+      react: React App
+      nginx: Nginx
+      react -> nginx
+    }
+
+    backend: Backend {
+      api: API
+      worker: Worker
+      queue: Queue {
+        shape: queue
+      }
+      api -> queue
+      worker -> queue
+    }
+
+    data: Data Layer {
+      postgres: PostgreSQL {
+        shape: cylinder
+      }
+      redis: Redis {
+        shape: cylinder
+      }
+    }
+
+    frontend -> backend.api
+    backend.api -> data.postgres
+    backend.worker -> data.redis
+  }
+
+  deployment: {
+    direction: right
+
+    cloud: AWS {
+      vpc: VPC {
+        public: Public Subnet {
+          alb: Load Balancer
+        }
+        private: Private Subnet {
+          ecs: ECS Cluster
+          rds: RDS
+        }
+        public.alb -> private.ecs
+        private.ecs -> private.rds
+      }
+    }
+  }
+}
