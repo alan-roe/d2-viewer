@@ -43,16 +43,16 @@ bun run typecheck    # Type check
 
 ## Related
 
-- **Skill:** `~/.claude/skills/d2-diagrams/` or `~/workspace/skills/d2-diagrams/`
-- **Skill ZIP:** Generate with `cd ~/.claude/skills && zip -r d2-diagrams.zip d2-diagrams`
+- **Skill:** `~/.claude/skills/d2-diagrams/` (hardlinked to `~/workspace/skills/d2-diagrams/`)
+- **Skill ZIP:** `~/workspace/outputs/d2-diagrams.zip`
 
 ## Claude Desktop Integration
 
 The D2 skill can be imported into Claude Desktop:
 
-1. Generate ZIP: `cd ~/.claude/skills && zip -r ~/Desktop/d2-diagrams.zip d2-diagrams`
+1. Generate ZIP: `cd ~/.claude/skills && zip -r ~/workspace/outputs/d2-diagrams.zip d2-diagrams`
 2. Open Claude Desktop → Settings → Capabilities
-3. Upload `d2-diagrams.zip`
+3. Upload `~/workspace/outputs/d2-diagrams.zip`
 4. Toggle the skill on
 
 The skill provides D2 syntax patterns and references the prerender script for HTML generation.
