@@ -5,25 +5,19 @@
  * Usage: bun run scripts/prerender.ts input.d2 [-o output.html] [--title "Title"]
  *
  * This script:
- * 1. Parses the D2 file to extract layer/scenario/step structure
- * 2. Renders each target to SVG using the d2 CLI
- * 3. Generates an HTML file with embedded SVGs
+ * 1. Builds a filesystem map by resolving @imports recursively
+ * 2. Compiles the D2 diagram using @terrastruct/d2 to get full layer tree
+ * 3. Renders each target (root + all layers) to SVG
+ * 4. Generates an HTML file with embedded SVGs
  */
 
 import { parseArgs } from "util";
-import { readFile, writeFile } from "fs/promises";
-import { basename, dirname, resolve } from "path";
-import { execSync } from "child_process";
+import { readFile, writeFile, access } from "fs/promises";
+import { basename, dirname, resolve, join, relative } from "path";
+import { D2, type Diagram, type CompileResponse } from "@terrastruct/d2";
+import { extractLayers, flattenTargets, type LayerNode } from "../src/layer-utils.js";
 
 // Types
-interface LayerNode {
-  name: string;
-  path: string;
-  type: "layer" | "scenario" | "step";
-  title?: string;
-  children: LayerNode[];
-}
-
 interface D2DiagramData {
   title: string;
   layers: LayerNode[];
@@ -69,105 +63,97 @@ const outputPath = values.output
 const title = values.title ?? basename(inputPath, ".d2");
 
 /**
- * Parse D2 source to extract layer/scenario/step declarations
- * This is a simple regex-based parser that finds top-level declarations
+ * Build filesystem map for d2.compile by resolving @imports recursively
  */
-function extractTargetsFromSource(source: string): string[] {
-  const targets: string[] = [];
+async function buildFileSystem(entryPath: string): Promise<Record<string, string>> {
+  const fs: Record<string, string> = {};
+  const baseDir = dirname(entryPath);
+  const processed = new Set<string>();
 
-  // Match layers: { ... }, scenarios: { ... }, steps: { ... }
-  // This is a simplified parser - it finds top-level declarations
-  const blockPattern = /(layers|scenarios|steps)\s*:\s*\{/g;
+  async function processFile(filePath: string): Promise<void> {
+    // Normalize and check if already processed
+    const normalizedPath = resolve(filePath);
+    if (processed.has(normalizedPath)) return;
+    processed.add(normalizedPath);
 
-  let match;
-  while ((match = blockPattern.exec(source)) !== null) {
-    const type = match[1] as "layers" | "scenarios" | "steps";
-    const startIdx = match.index + match[0].length;
-
-    // Find matching closing brace
-    let depth = 1;
-    let idx = startIdx;
-    while (depth > 0 && idx < source.length) {
-      if (source[idx] === "{") depth++;
-      else if (source[idx] === "}") depth--;
-      idx++;
+    // Read file content
+    let content: string;
+    try {
+      content = await readFile(normalizedPath, "utf-8");
+    } catch (error) {
+      console.warn(`Warning: Could not read ${normalizedPath}`);
+      return;
     }
 
-    const blockContent = source.slice(startIdx, idx - 1);
+    // Store with path relative to baseDir
+    const relativePath = relative(baseDir, normalizedPath);
+    fs[relativePath] = content;
 
-    // Extract names from the block - look for "name: {" patterns
-    const namePattern = /^\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*\{/gm;
-    let nameMatch;
-    while ((nameMatch = namePattern.exec(blockContent)) !== null) {
-      const name = nameMatch[1];
-      targets.push(`${type}.${name}`);
+    // Find @imports and process them recursively
+    // Patterns:
+    // - "...@path/to/file" (spread import)
+    // - "@path/to/file" (direct import)
+    // - "name: @path/to/file" (layer import)
+    const importPattern = /(?:\.\.\.)?@([^\s\n;{}]+)/g;
+    let match;
+    while ((match = importPattern.exec(content)) !== null) {
+      const importRef = match[1];
+
+      // Resolve the import path relative to the current file's directory
+      const currentDir = dirname(normalizedPath);
+      let importPath = join(currentDir, importRef);
+
+      // Add .d2 extension if not present
+      if (!importPath.endsWith(".d2")) {
+        importPath += ".d2";
+      }
+
+      // Check if file exists
+      try {
+        await access(importPath);
+        await processFile(importPath);
+      } catch {
+        // Try without .d2 extension (in case it's already a full path)
+        const altPath = join(currentDir, importRef);
+        try {
+          await access(altPath);
+          await processFile(altPath);
+        } catch {
+          console.warn(`Warning: Import not found: ${importRef} (from ${relativePath})`);
+        }
+      }
     }
   }
 
-  return targets;
+  await processFile(entryPath);
+  return fs;
 }
 
 /**
- * Build layer tree from flat target list
+ * Ensure SVG has explicit width/height attributes based on viewBox.
+ * D2 generates outer SVGs with only viewBox, which collapse to 0x0
+ * when CSS uses width: auto; height: auto.
  */
-function buildLayerTree(targets: string[]): LayerNode[] {
-  const nodes: LayerNode[] = [];
+function ensureSvgDimensions(svg: string): string {
+  // Match the opening <svg tag
+  const svgTagMatch = svg.match(/^(<svg\s+[^>]*)(>)/);
+  if (!svgTagMatch) return svg;
 
-  for (const target of targets) {
-    const parts = target.split(".");
-    if (parts.length < 2) continue;
+  const [fullMatch, openTag, closeAngle] = svgTagMatch;
 
-    const type = parts[0] as "layers" | "scenarios" | "steps";
-    const name = parts[1];
+  // Check if it already has width attribute
+  if (/\swidth\s*=/.test(openTag)) return svg;
 
-    // Map type string to LayerNode type
-    const nodeType: LayerNode["type"] =
-      type === "layers" ? "layer" : type === "scenarios" ? "scenario" : "step";
+  // Extract viewBox dimensions
+  const viewBoxMatch = openTag.match(/viewBox\s*=\s*["']([^"']+)["']/);
+  if (!viewBoxMatch) return svg;
 
-    nodes.push({
-      name,
-      path: target,
-      type: nodeType,
-      children: [], // Could recurse for nested layers, but keeping simple for now
-    });
-  }
+  const [, , w, h] = viewBoxMatch[1].split(/\s+/);
+  if (!w || !h) return svg;
 
-  return nodes;
-}
-
-/**
- * Render a specific target using d2 CLI
- */
-function renderTarget(
-  inputPath: string,
-  target: string,
-  options: { layout: string; theme: string; sketch: boolean }
-): string {
-  const args = [
-    inputPath,
-    "-",
-    `--layout=${options.layout}`,
-    `--theme=${options.theme}`,
-    "--no-xml-tag",
-    "--center",
-    `--target=${target || ""}`,
-  ];
-
-  if (options.sketch) {
-    args.push("--sketch");
-  }
-
-  try {
-    const svg = execSync(`d2 ${args.join(" ")}`, {
-      encoding: "utf-8",
-      maxBuffer: 50 * 1024 * 1024, // 50MB buffer for large diagrams
-      cwd: dirname(inputPath), // Run from input directory for relative imports
-    });
-    return svg;
-  } catch (error) {
-    console.error(`Error rendering target "${target || "root"}":`, error);
-    throw error;
-  }
+  // Insert width and height attributes
+  const newOpenTag = `${openTag} width="${w}" height="${h}"`;
+  return svg.replace(fullMatch, newOpenTag + closeAngle);
 }
 
 /**
@@ -208,32 +194,76 @@ function escapeHtml(str: string): string {
 // Main
 async function main() {
   console.log(`Reading ${inputPath}...`);
-  const source = await readFile(inputPath, "utf-8");
 
-  // Extract targets from source
-  console.log("Parsing D2 source...");
-  const targets = extractTargetsFromSource(source);
-  console.log(`Found ${targets.length} targets: ${targets.join(", ") || "(root only)"}`);
+  // Build filesystem map with all imports resolved
+  console.log("Building filesystem (resolving imports)...");
+  const fsMap = await buildFileSystem(inputPath);
+  const fileCount = Object.keys(fsMap).length;
+  console.log(`Found ${fileCount} file${fileCount === 1 ? "" : "s"}`);
 
-  // Build layer tree
-  const layers = buildLayerTree(targets);
+  // Initialize D2
+  const d2 = new D2();
+
+  // Compile diagram with full filesystem
+  console.log("Compiling D2 diagram...");
+  const inputBasename = basename(inputPath);
+
+  let compileResult: { diagram: Diagram; renderOptions: CompileResponse["renderOptions"] };
+  try {
+    compileResult = await d2.compile({
+      fs: fsMap,
+      inputPath: inputBasename,
+      options: {
+        layout: (values.layout as "dagre" | "elk") ?? "dagre",
+        sketch: values.sketch ?? false,
+        themeID: parseInt(values.theme ?? "0", 10),
+      },
+    });
+  } catch (error) {
+    console.error("Compilation error:", error);
+    throw error;
+  }
+
+  // Extract layer tree from compiled diagram
+  const layers = extractLayers(compileResult.diagram);
+  const targets = flattenTargets(layers);
+  console.log(`Found ${targets.length} layer${targets.length === 1 ? "" : "s"}: ${targets.join(", ") || "(root only)"}`);
 
   // Render all targets
   const svgs: Record<string, string> = {};
   const renderOptions = {
-    layout: values.layout!,
-    theme: values.theme!,
-    sketch: values.sketch!,
+    ...compileResult.renderOptions,
+    center: true,
+    pad: 20,
+    noXMLTag: true,
   };
 
   // Render root
   console.log("Rendering root...");
-  svgs[""] = renderTarget(inputPath, "", renderOptions);
+  try {
+    const rootSvg = await d2.render(compileResult.diagram, {
+      ...renderOptions,
+      target: "",
+    });
+    svgs[""] = ensureSvgDimensions(rootSvg);
+  } catch (error) {
+    console.error("Error rendering root:", error);
+    throw error;
+  }
 
-  // Render each target
+  // Render each layer target
   for (const target of targets) {
     console.log(`Rendering ${target}...`);
-    svgs[target] = renderTarget(inputPath, target, renderOptions);
+    try {
+      const svg = await d2.render(compileResult.diagram, {
+        ...renderOptions,
+        target,
+      });
+      svgs[target] = ensureSvgDimensions(svg);
+    } catch (error) {
+      console.error(`Error rendering ${target}:`, error);
+      throw error;
+    }
   }
 
   // Generate HTML
